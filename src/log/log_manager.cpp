@@ -5,6 +5,37 @@
 
 namespace huadb {
 
+namespace {
+
+template <typename LogT>
+std::shared_ptr<LogT> AsLog(const std::shared_ptr<LogRecord> &log) {
+  return std::dynamic_pointer_cast<LogT>(log);
+}
+
+template <typename LogT>
+TablePageid LogPage(const std::shared_ptr<LogRecord> &log) {
+  auto typed_log = AsLog<LogT>(log);
+  return {typed_log->GetOid(), typed_log->GetPageId()};
+}
+
+bool TryGetLogPage(const std::shared_ptr<LogRecord> &log, TablePageid &page) {
+  switch (log->GetType()) {
+    case LogType::INSERT:
+      page = LogPage<InsertLog>(log);
+      return true;
+    case LogType::DELETE:
+      page = LogPage<DeleteLog>(log);
+      return true;
+    case LogType::NEW_PAGE:
+      page = LogPage<NewPageLog>(log);
+      return true;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
 LogManager::LogManager(Disk &disk, TransactionManager &transaction_manager, lsn_t next_lsn)
     : disk_(disk), transaction_manager_(transaction_manager), next_lsn_(next_lsn), flushed_lsn_(next_lsn - 1) {}
 
@@ -177,6 +208,32 @@ void LogManager::Rollback(xid_t xid) {
   // 通过 LogRecord::DeserializeFrom 函数解析日志
   // 调用日志的 Undo 函数
   // LAB 2 BEGIN
+
+  auto lsn = att_[xid];
+  lsn_t undo_next_lsn = NULL_LSN;
+
+  while (lsn != NULL_LSN) {
+    std::shared_ptr<LogRecord> log;
+
+    if (lsn > flushed_lsn_) {
+      std::unique_lock lock(log_buffer_mutex_);
+      for (const auto &record : log_buffer_) {
+        if (record->GetLSN() == lsn) {
+          log = record;
+          break;
+        }
+      }
+    } else {
+      auto data = std::make_unique<char[]>(MAX_LOG_SIZE);
+      disk_.ReadLog(lsn, MAX_LOG_SIZE, data.get());
+      log = LogRecord::DeserializeFrom(lsn, data.get());
+    }
+
+    log->Undo(*buffer_pool_, *catalog_, *this, undo_next_lsn);
+
+    undo_next_lsn = lsn;
+    lsn = log->GetPrevLSN();
+  }
 }
 
 void LogManager::Recover() {
@@ -249,16 +306,122 @@ void LogManager::Analyze() {
   // 根据 Checkpoint 日志恢复脏页表、活跃事务表等元信息
   // 必要时调用 transaction_manager_.SetNextXid 来恢复事务 id
   // LAB 2 BEGIN
+  att_.clear();
+  dpt_.clear();
+
+  auto read_log_at = [this](lsn_t lsn) {
+    auto data = std::make_unique<char[]>(MAX_LOG_SIZE);
+    disk_.ReadLog(lsn, MAX_LOG_SIZE, data.get());
+    return LogRecord::DeserializeFrom(lsn, data.get());
+  };
+  auto update_active_transaction = [this](xid_t xid, lsn_t lsn) {
+    if (xid != NULL_XID) {
+      att_[xid] = lsn;
+      transaction_manager_.SetNextXid(xid + 1);
+    }
+  };
+  auto add_dirty_page = [this](oid_t oid, pageid_t page_id, lsn_t lsn) {
+    if (page_id != NULL_PAGE_ID) {
+      dpt_.try_emplace({oid, page_id}, lsn);
+    }
+  };
+  auto add_log_dirty_pages = [&add_dirty_page](const std::shared_ptr<LogRecord> &log, lsn_t lsn) {
+    TablePageid page;
+    if (!TryGetLogPage(log, page)) {
+      return;
+    }
+    add_dirty_page(page.table_oid_, page.page_id_, lsn);
+    if (log->GetType() == LogType::NEW_PAGE) {
+      auto new_page_log = AsLog<NewPageLog>(log);
+      add_dirty_page(page.table_oid_, new_page_log->GetPrevPageId(), lsn);
+    }
+  };
+
+  lsn_t lsn = checkpoint_lsn == 0 ? FIRST_LSN : checkpoint_lsn;
+  while (lsn < next_lsn_) {
+    auto log = read_log_at(lsn);
+    auto xid = log->GetXid();
+
+    switch (log->GetType()) {
+      case LogType::BEGIN:
+        update_active_transaction(xid, lsn);
+        break;
+      case LogType::COMMIT:
+      case LogType::ROLLBACK:
+        if (xid != NULL_XID) {
+          transaction_manager_.SetNextXid(xid + 1);
+        }
+        att_.erase(xid);
+        break;
+      case LogType::INSERT:
+      case LogType::DELETE:
+      case LogType::NEW_PAGE:
+        update_active_transaction(xid, lsn);
+        add_log_dirty_pages(log, lsn);
+        break;
+      case LogType::END_CHECKPOINT: {
+        auto end_checkpoint_log = AsLog<EndCheckpointLog>(log);
+        att_ = end_checkpoint_log->GetATT();
+        dpt_ = end_checkpoint_log->GetDPT();
+        break;
+      }
+      case LogType::BEGIN_CHECKPOINT:
+        break;
+    }
+
+    lsn += log->GetSize();
+  }
 }
 
 void LogManager::Redo() {
   // 正序读取日志，调用日志记录的 Redo 函数
   // LAB 2 BEGIN
+  if (dpt_.empty()) {
+    return;
+  }
+
+  auto read_log_at = [this](lsn_t lsn) {
+    auto data = std::make_unique<char[]>(MAX_LOG_SIZE);
+    disk_.ReadLog(lsn, MAX_LOG_SIZE, data.get());
+    return LogRecord::DeserializeFrom(lsn, data.get());
+  };
+  auto is_dirty_page_log = [this](oid_t oid, pageid_t page_id, lsn_t lsn) {
+    auto it = dpt_.find({oid, page_id});
+    return it != dpt_.end() && it->second <= lsn;
+  };
+  auto should_redo_log = [&is_dirty_page_log](const std::shared_ptr<LogRecord> &log, lsn_t lsn) {
+    TablePageid page;
+    if (!TryGetLogPage(log, page)) {
+      return false;
+    }
+    return is_dirty_page_log(page.table_oid_, page.page_id_, lsn);
+  };
+
+  lsn_t lsn = next_lsn_;
+  for (const auto &[_, rec_lsn] : dpt_) {
+    if (rec_lsn < lsn) {
+      lsn = rec_lsn;
+    }
+  }
+
+  while (lsn < next_lsn_) {
+    auto log = read_log_at(lsn);
+    if (should_redo_log(log, lsn)) {
+      log->Redo(*buffer_pool_, *catalog_, *this);
+    }
+
+    lsn += log->GetSize();
+  }
 }
 
 void LogManager::Undo() {
   // 根据活跃事务表，将所有活跃事务回滚
   // LAB 2 BEGIN
+  auto active_transactions = att_;
+  for (const auto &[xid, _] : active_transactions) {
+    Rollback(xid);
+    att_.erase(xid);
+  }
 }
 
 }  // namespace huadb

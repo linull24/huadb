@@ -37,34 +37,79 @@ Rid Table::InsertRecord(std::shared_ptr<Record> record, xid_t xid, cid_t cid, bo
   // 找到空间足够的页面后，通过 TablePage 插入记录
   // 返回插入记录的 rid
   // LAB 1 BEGIN
-  std::unique_ptr<TablePage> pending_table_page;
-  pageid_t page_id; //因为我们需要后续跟踪，可能会insert
-  if (first_page_id_ == NULL_PAGE_ID) {
-    page_id = 0;
-    pending_table_page = std::make_unique<TablePage>(
-        buffer_pool_.NewPage(db_oid_, oid_, page_id));
-    pending_table_page->Init();
-    first_page_id_ = page_id;
-  } else {
-    page_id = first_page_id_;
-    pending_table_page = std::make_unique<TablePage>(
-        buffer_pool_.GetPage(db_oid_, oid_, page_id));
-    while (pending_table_page->GetFreeSpaceSize() < record->GetSize()
-           && pending_table_page->GetNextPageId() != NULL_PAGE_ID) {
-      page_id = pending_table_page->GetNextPageId();
-      pending_table_page = std::make_unique<TablePage>(
-          buffer_pool_.GetPage(db_oid_, oid_, page_id));
+  struct InsertTarget {
+    pageid_t page_id;
+    std::unique_ptr<TablePage> table_page;
+  };
+  auto get_table_page = [this](pageid_t page_id) {
+    return std::make_unique<TablePage>(buffer_pool_.GetPage(db_oid_, oid_, page_id));
+  };
+  auto new_table_page = [this](pageid_t page_id) {
+    auto table_page = std::make_unique<TablePage>(buffer_pool_.NewPage(db_oid_, oid_, page_id));
+    table_page->Init();
+    return table_page;
+  };
+  auto append_new_page_log = [this, xid, write_log](pageid_t prev_page_id, pageid_t page_id, TablePage *prev_table_page,
+                                                    TablePage &table_page) {
+    if (!write_log) {
+      return;
     }
-    if (pending_table_page->GetFreeSpaceSize() < record->GetSize()) {
-      page_id++;
-      pending_table_page->SetNextPageId(page_id);
-      pending_table_page = std::make_unique<TablePage>(
-          buffer_pool_.NewPage(db_oid_, oid_, page_id));
-      pending_table_page->Init();
+    auto lsn = log_manager_.AppendNewPageLog(xid, oid_, prev_page_id, page_id);
+    table_page.SetPageLSN(lsn);
+    if (prev_table_page != nullptr) {
+      prev_table_page->SetPageLSN(lsn);
     }
-  }
-  slotid_t slot_id = pending_table_page->InsertRecord(record, xid, cid);
-  return {page_id, slot_id};
+  };
+  auto append_insert_log = [this, xid, write_log](const std::shared_ptr<Record> &record, pageid_t page_id,
+                                                  slotid_t slot_id, TablePage &table_page) {
+    if (!write_log) {
+      return;
+    }
+    auto raw_record = std::make_unique<char[]>(record->GetSize());
+    record->SerializeTo(raw_record.get());
+    auto lsn = log_manager_.AppendInsertLog(xid, oid_, page_id, slot_id, table_page.GetUpper(), record->GetSize(),
+                                            raw_record.get());
+    table_page.SetPageLSN(lsn);
+  };
+  auto find_insert_target = [this, record_size = record->GetSize(), &get_table_page, &new_table_page,
+                             &append_new_page_log] {
+    if (first_page_id_ == NULL_PAGE_ID) {
+      pageid_t page_id = 0;
+      auto table_page = new_table_page(page_id);
+      first_page_id_ = page_id;
+      append_new_page_log(NULL_PAGE_ID, page_id, nullptr, *table_page);
+      return InsertTarget{page_id, std::move(table_page)};
+    }
+
+    auto page_id = first_page_id_;
+    auto table_page = get_table_page(page_id);
+    while (table_page->GetFreeSpaceSize() < record_size && table_page->GetNextPageId() != NULL_PAGE_ID) {
+      page_id = table_page->GetNextPageId();
+      table_page = get_table_page(page_id);
+    }
+
+    if (table_page->GetFreeSpaceSize() >= record_size) {
+      return InsertTarget{page_id, std::move(table_page)};
+    }
+
+    auto prev_page_id = page_id;
+    auto new_page_id = prev_page_id + 1;
+    table_page->SetNextPageId(new_page_id);
+
+    auto new_page = new_table_page(new_page_id);
+    append_new_page_log(prev_page_id, new_page_id, table_page.get(), *new_page);
+    return InsertTarget{new_page_id, std::move(new_page)};
+  };
+  auto insert_into_target = [xid, cid, &append_insert_log](const std::shared_ptr<Record> &record,
+                                                           InsertTarget &target) {
+    auto slot_id = target.table_page->InsertRecord(record, xid, cid);
+    Rid rid{target.page_id, slot_id};
+    record->SetRid(rid);
+    append_insert_log(record, target.page_id, slot_id, *target.table_page);
+    return rid;
+  };
+  auto target = find_insert_target();
+  return insert_into_target(record, target);
 }
 
 void Table::DeleteRecord(const Rid &rid, xid_t xid, bool write_log) {
@@ -74,12 +119,16 @@ void Table::DeleteRecord(const Rid &rid, xid_t xid, bool write_log) {
 
   // 使用 TablePage 操作页面
   // LAB 1 BEGIN
-
-  TablePage(
-    buffer_pool_.GetPage(db_oid_,oid_,rid.page_id_)
-  )
-    .DeleteRecord(rid.slot_id_,xid);
-  
+  auto append_delete_log = [this, xid, write_log](const Rid &rid, TablePage &table_page) {
+    if (!write_log) {
+      return;
+    }
+    auto lsn = log_manager_.AppendDeleteLog(xid, oid_, rid.page_id_, rid.slot_id_);
+    table_page.SetPageLSN(lsn);
+  };
+  TablePage table_page(buffer_pool_.GetPage(db_oid_, oid_, rid.page_id_));
+  append_delete_log(rid, table_page);
+  table_page.DeleteRecord(rid.slot_id_, xid);
 }
 
 Rid Table::UpdateRecord(const Rid &rid, xid_t xid, cid_t cid, std::shared_ptr<Record> record, bool write_log) {

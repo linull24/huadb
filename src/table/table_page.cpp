@@ -86,6 +86,8 @@ void TablePage::UndoDeleteRecord(slotid_t slot_id) {
   // 清除记录的删除标记
   // 将页面设为 dirty
   // LAB 2 BEGIN
+  *reinterpret_cast<bool *>(page_data_ + slots_[slot_id].offset_) = false;
+  page_->SetDirty();
 }
 
 void TablePage::RedoInsertRecord(slotid_t slot_id, char *raw_record, db_size_t page_offset, db_size_t record_size) {
@@ -93,6 +95,17 @@ void TablePage::RedoInsertRecord(slotid_t slot_id, char *raw_record, db_size_t p
   // 注意维护 lower 和 upper 指针，以及 slots 数组
   // 将页面设为 dirty
   // LAB 2 BEGIN
+  memcpy(page_data_ + page_offset, raw_record, record_size);
+  slots_[slot_id].offset_ = page_offset;
+  slots_[slot_id].size_ = record_size;
+  db_size_t new_lower = PAGE_HEADER_SIZE + (slot_id + 1) * sizeof(Slot);
+  if (*lower_ < new_lower) {
+    *lower_ = new_lower;
+  }
+  if (*upper_ > page_offset) {
+    *upper_ = page_offset;
+  }
+  page_->SetDirty();
 }
 
 db_size_t TablePage::GetRecordCount() const { return (*lower_ - PAGE_HEADER_SIZE) / sizeof(Slot); }
