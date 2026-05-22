@@ -37,7 +37,34 @@ Rid Table::InsertRecord(std::shared_ptr<Record> record, xid_t xid, cid_t cid, bo
   // 找到空间足够的页面后，通过 TablePage 插入记录
   // 返回插入记录的 rid
   // LAB 1 BEGIN
-  return {0, 0};
+  std::unique_ptr<TablePage> pending_table_page;
+  pageid_t page_id; //因为我们需要后续跟踪，可能会insert
+  if (first_page_id_ == NULL_PAGE_ID) {
+    page_id = 0;
+    pending_table_page = std::make_unique<TablePage>(
+        buffer_pool_.NewPage(db_oid_, oid_, page_id));
+    pending_table_page->Init();
+    first_page_id_ = page_id;
+  } else {
+    page_id = first_page_id_;
+    pending_table_page = std::make_unique<TablePage>(
+        buffer_pool_.GetPage(db_oid_, oid_, page_id));
+    while (pending_table_page->GetFreeSpaceSize() < record->GetSize()
+           && pending_table_page->GetNextPageId() != NULL_PAGE_ID) {
+      page_id = pending_table_page->GetNextPageId();
+      pending_table_page = std::make_unique<TablePage>(
+          buffer_pool_.GetPage(db_oid_, oid_, page_id));
+    }
+    if (pending_table_page->GetFreeSpaceSize() < record->GetSize()) {
+      page_id++;
+      pending_table_page->SetNextPageId(page_id);
+      pending_table_page = std::make_unique<TablePage>(
+          buffer_pool_.NewPage(db_oid_, oid_, page_id));
+      pending_table_page->Init();
+    }
+  }
+  slotid_t slot_id = pending_table_page->InsertRecord(record, xid, cid);
+  return {page_id, slot_id};
 }
 
 void Table::DeleteRecord(const Rid &rid, xid_t xid, bool write_log) {
@@ -47,6 +74,12 @@ void Table::DeleteRecord(const Rid &rid, xid_t xid, bool write_log) {
 
   // 使用 TablePage 操作页面
   // LAB 1 BEGIN
+
+  TablePage(
+    buffer_pool_.GetPage(db_oid_,oid_,rid.page_id_)
+  )
+    .DeleteRecord(rid.slot_id_,xid);
+  
 }
 
 Rid Table::UpdateRecord(const Rid &rid, xid_t xid, cid_t cid, std::shared_ptr<Record> record, bool write_log) {

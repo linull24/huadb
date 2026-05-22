@@ -17,7 +17,77 @@ std::shared_ptr<Record> TableScan::GetNextRecord(xid_t xid, IsolationLevel isola
   // 扫描结束时，返回空指针
   // 注意处理扫描空表的情况（rid_.page_id_ 为 NULL_PAGE_ID）
   // LAB 1 BEGIN
-  return nullptr;
+
+  struct Step {
+    bool has_value;
+    std::shared_ptr<Record> record;
+    Rid next_rid;
+  };
+  auto make_rid = [] (pageid_t page_id, int slot_id) -> Rid {
+    Rid rid;
+    rid.page_id_ = page_id;
+    rid.slot_id_ = slot_id;
+    return rid;
+  };
+  auto next_non_empty_page = [] (BufferPool &buffer_pool,
+                                const std::shared_ptr<Table> &table,
+                                pageid_t page_id,
+                                const auto &make_rid) -> Rid {
+    while (page_id != NULL_PAGE_ID) {
+      TablePage table_page(
+        buffer_pool.GetPage(table->GetDbOid(), table->GetOid(), page_id)
+      );
+      if (table_page.GetRecordCount() > 0) {
+        return make_rid(page_id, 0);
+      }
+      page_id = table_page.GetNextPageId();
+    }
+    return make_rid(NULL_PAGE_ID, 0);
+  };
+  auto scan_one = [] (BufferPool &buffer_pool,
+                      const std::shared_ptr<Table> &table,
+                      Rid rid,
+                      const auto &make_rid,
+                      const auto &next_non_empty_page) -> Step {
+    if (rid.page_id_ == NULL_PAGE_ID) {
+      return Step{false, nullptr, make_rid(NULL_PAGE_ID, 0)};
+    }
+    TablePage table_page(
+      buffer_pool.GetPage(table->GetDbOid(), table->GetOid(), rid.page_id_)
+    );
+    auto record = table_page.GetRecord(rid, table->GetColumnList());
+    Rid next_rid;
+    if (rid.slot_id_ + 1 < table_page.GetRecordCount()) {
+      next_rid = rid;
+      ++next_rid.slot_id_;
+    } else {
+      next_rid = next_non_empty_page(
+        buffer_pool,
+        table,
+        table_page.GetNextPageId(),
+        make_rid
+      );
+    }
+    return Step{true, record, next_rid};
+  };
+  while (true) {
+    auto step = scan_one(
+      buffer_pool_,
+      table_,
+      rid_,
+      make_rid,
+      next_non_empty_page
+    );
+    if (!step.has_value) {
+      rid_ = make_rid(NULL_PAGE_ID, 0);
+      return nullptr;
+    }
+    rid_ = step.next_rid;
+    if (step.record->IsDeleted()) {
+      continue;
+    }
+    return step.record;
+  }
 }
 
 }  // namespace huadb
