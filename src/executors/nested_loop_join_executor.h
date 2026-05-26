@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "executors/executor.h"
 #include "operators/nested_loop_join_operator.h"
 
@@ -14,6 +16,9 @@ class NestedLoopJoinExecutor : public Executor {
 
  private:
   std::shared_ptr<const NestedLoopJoinOperator> plan_;
+  std::shared_ptr<Record> current_left_;
+  std::vector<std::shared_ptr<Record>> right_records_;
+  size_t right_index_ = 0;
 };
 
 }  // namespace huadb

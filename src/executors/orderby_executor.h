@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <vector>
+
 #include "executors/executor.h"
 #include "operators/orderby_operator.h"
 
@@ -14,6 +17,9 @@ class OrderByExecutor : public Executor {
 
  private:
   std::shared_ptr<const OrderByOperator> plan_;
+  std::vector<std::shared_ptr<Record>> records_;
+  size_t index_ = 0;
+  bool sorted_ = false;
 };
 
 }  // namespace huadb

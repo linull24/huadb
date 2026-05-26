@@ -13,6 +13,9 @@ class LimitExecutor : public Executor {
 
  private:
   std::shared_ptr<const LimitOperator> plan_;
+  uint32_t current_pos_ = 0;
+  uint32_t offset_ = 0;
+  uint32_t max_pos_ = 0;
 };
 
 }  // namespace huadb
