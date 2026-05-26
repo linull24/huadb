@@ -17,6 +17,9 @@ using enum_t = uint8_t;
 struct Rid {
   pageid_t page_id_;
   slotid_t slot_id_;
+  bool operator==(const Rid &other) const {
+    return page_id_ == other.page_id_ && slot_id_ == other.slot_id_;
+  }
 };
 
 struct TablePageid {
@@ -35,6 +38,13 @@ struct Slot {
 }  // namespace huadb
 
 namespace std {
+
+template <>
+struct hash<huadb::Rid> {
+  uint64_t operator()(const huadb::Rid &rid) const {
+    return (static_cast<uint64_t>(rid.page_id_) << 16) | rid.slot_id_;
+  }
+};
 
 template <>
 struct hash<huadb::TablePageid> {

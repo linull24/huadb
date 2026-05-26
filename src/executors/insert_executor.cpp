@@ -27,6 +27,9 @@ std::shared_ptr<Record> InsertExecutor::Next() {
     auto table_record = std::make_shared<Record>(std::move(values));
     // 通过 context_ 获取正确的锁，加锁失败时抛出异常
     // LAB 3 BEGIN
+    if (!context_.GetLockManager().LockTable(context_.GetXid(), LockType::IX, plan_->GetTableOid())) {
+      throw DbException("Cannot acquire lock");
+    }
     auto rid = table_->InsertRecord(std::move(table_record), context_.GetXid(), context_.GetCid(), true);
     count++;
   }

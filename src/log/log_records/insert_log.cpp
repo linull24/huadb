@@ -78,7 +78,7 @@ void InsertLog::Undo(BufferPool &buffer_pool, Catalog &catalog, LogManager &log_
   auto page = buffer_pool.GetPage(db_oid, oid_, page_id_);
   auto page_data = page->GetData();
   auto slots = reinterpret_cast<Slot *>(page_data + PAGE_HEADER_SIZE);
-  *reinterpret_cast<bool *>(page_data + slots[slot_id_].offset_) = true;
+  memcpy(page_data + slots[slot_id_].offset_ + 5, &xid_, sizeof(xid_t));
   page->SetDirty();
 }
 

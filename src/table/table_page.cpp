@@ -39,6 +39,9 @@ slotid_t TablePage::InsertRecord(std::shared_ptr<Record> record, xid_t xid, cid_
   // LAB 1 BEGIN
   db_size_t record_size = record->GetSize();
   db_size_t record_offset = *upper_ - record_size;
+  
+  record->SetXmin(xid);
+  record->SetCid(cid);
   record->SerializeTo(page_data_ + record_offset);
   slotid_t slot_id = (*lower_ - PAGE_HEADER_SIZE) / sizeof(Slot);
   slots_[slot_id].offset_ = record_offset;
@@ -52,12 +55,13 @@ slotid_t TablePage::InsertRecord(std::shared_ptr<Record> record, xid_t xid, cid_
 void TablePage::DeleteRecord(slotid_t slot_id, xid_t xid) {
   // 更改实验 1 的实现，改为通过 xid 标记删除
   // LAB 3 BEGIN
-
+  
   // 将 slot_id 对应的 record 标记为删除
   // 可使用 Record::DeserializeHeaderFrom 函数读取记录头
   // 将 page 标记为 dirty
   // LAB 1 BEGIN
-  *reinterpret_cast<bool *>(page_data_ + slots_[slot_id].offset_) = true;
+  
+  memcpy(page_data_ + slots_[slot_id].offset_+5,&xid,sizeof(xid_t));
   page_->SetDirty();
 }
 
@@ -86,7 +90,7 @@ void TablePage::UndoDeleteRecord(slotid_t slot_id) {
   // 清除记录的删除标记
   // 将页面设为 dirty
   // LAB 2 BEGIN
-  *reinterpret_cast<bool *>(page_data_ + slots_[slot_id].offset_) = false;
+  memset(page_data_ + slots_[slot_id].offset_+5,NULL_XID,sizeof(xid_t));
   page_->SetDirty();
 }
 

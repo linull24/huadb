@@ -70,6 +70,42 @@ std::shared_ptr<Record> TableScan::GetNextRecord(xid_t xid, IsolationLevel isola
     }
     return Step{true, record, next_rid};
   };
+  auto check_visible = [](const std::shared_ptr<Record> &record, xid_t xid, cid_t cid,
+                           const std::unordered_set<xid_t> &active_xids, IsolationLevel isolation_level) {
+    // deleted
+    if (record->GetXmax() != NULL_XID) {
+      if (xid == NULL_XID) {
+        return false;
+      }
+      if (record->GetXmax() == xid) {
+        return false;
+      }
+      if (active_xids.find(record->GetXmax()) != active_xids.end()) {
+        // still active
+      } else if (isolation_level != IsolationLevel::READ_COMMITTED && record->GetXmax() > xid) {
+        // RR/SERIALIZABLE
+      } else {
+        return false;
+      }
+    }
+    if (xid == NULL_XID) {
+      return true;
+    }
+    // halloween 
+    if (record->GetXmin() == xid && record->GetCid() == cid) {
+      return false;
+    }
+    // other 
+    if (record->GetXmin() != xid && record->GetXmin() != NULL_XID) {
+      if (active_xids.find(record->GetXmin()) != active_xids.end()) {
+        return false;
+      }
+      if (isolation_level != IsolationLevel::READ_COMMITTED && record->GetXmin() > xid) {
+        return false;
+      }
+    }
+    return true;
+  };
   while (true) {
     auto step = scan_one(
       buffer_pool_,
@@ -83,7 +119,7 @@ std::shared_ptr<Record> TableScan::GetNextRecord(xid_t xid, IsolationLevel isola
       return nullptr;
     }
     rid_ = step.next_rid;
-    if (step.record->IsDeleted()) {
+    if (!check_visible(step.record, xid, cid, active_xids, isolation_level)) {
       continue;
     }
     return step.record;
