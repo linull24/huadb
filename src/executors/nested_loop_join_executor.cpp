@@ -10,6 +10,7 @@ NestedLoopJoinExecutor::NestedLoopJoinExecutor(ExecutorContext &context,
 void NestedLoopJoinExecutor::Init() {
   children_[0]->Init();
   children_[1]->Init();
+
 }
 
 std::shared_ptr<Record> NestedLoopJoinExecutor::Next() {
@@ -17,7 +18,9 @@ std::shared_ptr<Record> NestedLoopJoinExecutor::Next() {
   // 使用 OperatorExpression 的 EvaluateJoin 函数判断是否满足 join 条件
   // 使用 Record 的 Append 函数进行记录的连接
   // LAB 4 BEGIN
-  return nullptr;
+  std::shared_ptr<Record>  res=nullptr;
+  auto next_record_notnull
+  return res;
 }
 
 }  // namespace huadb
